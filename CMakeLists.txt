@@ -8,20 +8,20 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GLIB REQUIRED glib-2.0)
 
 
-add_compile_options(
-        -O3
-)
-
 #add_compile_options(
-#        -fsanitize=undefined,thread
-#        -fno-omit-frame-pointer
-#        -g
-#        -O1
+#        -O3
 #)
-#add_link_options(
-#        -fsanitize=undefined,thread
-#        -fno-omit-frame-pointer
-#)
+
+add_compile_options(
+        -fsanitize=undefined,thread
+        -fno-omit-frame-pointer
+        -g
+        -O1
+)
+add_link_options(
+        -fsanitize=undefined,thread
+        -fno-omit-frame-pointer
+)
 
 add_executable(repa_server main.c
         network/master_listener.c
@@ -53,7 +53,10 @@ add_executable(repa_server main.c
         util/config_extend.c
         signal_handler.c
         signal_handler.h
-        signal_handler.c)
+        signal_handler.c
+        coroutine_pool/coroutine_pool.h
+        coroutine_pool/coroutine_pool.c
+        coroutine_pool/coro_test.c)
 
 # Добавляем include пути и линковку
 target_include_directories(repa_server PRIVATE ${GLIB_INCLUDE_DIRS})

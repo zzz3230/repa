@@ -13,26 +13,29 @@
 #include "../db/stats_service.h"
 #include "../util/config_extend.h"
 
-pthread_t* pthreads;
-GString** workers_buffers;
+pthread_t *pthreads;
+bool *pthreads_finished;
+
+GString **workers_buffers;
 
 gint total_stop = 0;
 pthread_cond_t workers_cond;
 pthread_mutex_t queue_mutex;
 
-GQueue* clients_queue;
+GQueue *clients_queue;
 int workers_count;
 
 ClientExecutionCallback client_executed_callback;
-void set_client_executed_client(ClientExecutionCallback cb){
+
+void set_client_executed_client(ClientExecutionCallback cb) {
     client_executed_callback = cb;
 }
 
 
-void do_task(ClientTask* task, long worker_id){
+void do_task(ClientTask *task, long worker_id) {
     //LOG(LOG_INFO, "Doing W(%ld) CL(%ld) ID(%ld)", worker_id, task->client->id, task->task_id);
 
-    RespData* result = process_command(task->command, task->client);
+    RespData *result = process_command(task->command, task->client);
 
     g_string_truncate(workers_buffers[worker_id], 0);
     resp_data_serialize(workers_buffers[worker_id], result);
@@ -40,7 +43,7 @@ void do_task(ClientTask* task, long worker_id){
             task->client->net_client,
             workers_buffers[worker_id]->str,
             workers_buffers[worker_id]->len
-            );
+    );
 
     //LOGWP(LOG_INFO, "Done  W(%lld) CL(%d) ID(%d)", worker_id, task->client->id, task->task_id);
 
@@ -48,16 +51,16 @@ void do_task(ClientTask* task, long worker_id){
 
 }
 
-void do_client_tasks(RepaClient* client, long worker_id){
+void do_client_tasks(RepaClient *client, long worker_id) {
     //
 
-    while (!g_atomic_int_get(&total_stop)){
+    while (!g_atomic_int_get(&total_stop)) {
         pthread_mutex_lock(&client->mutex);
-        if(client->commands_queue->length <= 0){
+        if (client->commands_queue->length <= 0) {
             pthread_mutex_unlock(&client->mutex);
             break;
         }
-        ClientTask* task = g_queue_pop_head(client->commands_queue);
+        ClientTask *task = g_queue_pop_head(client->commands_queue);
         pthread_mutex_unlock(&client->mutex);
 
         do_task(task, worker_id);
@@ -66,24 +69,28 @@ void do_client_tasks(RepaClient* client, long worker_id){
     }
 }
 
-int queue_has_task(){
+int queue_has_task() {
     return clients_queue->length > 0;
 }
 
-void* worker_impl(void* worker_id_data){
-    long* worker_id = worker_id_data;
+void *worker_impl(void *worker_id_data) {
+    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
-    while (!g_atomic_int_get(&total_stop)){
+    long *worker_id = worker_id_data;
+
+    //if(*worker_id%2) while (1) {}
+
+    while (!g_atomic_int_get(&total_stop)) {
         pthread_mutex_lock(&queue_mutex);
-        while (!g_atomic_int_get(&total_stop) && !queue_has_task()){
+        while (!g_atomic_int_get(&total_stop) && !queue_has_task()) {
             pthread_cond_wait(&workers_cond, &queue_mutex);
         }
-        if(g_atomic_int_get(&total_stop)){
+        if (g_atomic_int_get(&total_stop)) {
             pthread_mutex_unlock(&queue_mutex);
             break;
         }
         //Getting client
-        RepaClient* client = g_queue_pop_head(clients_queue);
+        RepaClient *client = g_queue_pop_head(clients_queue);
         g_atomic_int_set(&client->is_doing_tasks, TRUE);
         g_atomic_int_set(&client->is_in_working_queue, FALSE);
         pthread_mutex_unlock(&queue_mutex);
@@ -93,7 +100,7 @@ void* worker_impl(void* worker_id_data){
 
         g_atomic_int_set(&client->is_doing_tasks, FALSE);
 
-        if(client_executed_callback)
+        if (client_executed_callback)
             client_executed_callback(client);
     }
 
@@ -101,9 +108,9 @@ void* worker_impl(void* worker_id_data){
 }
 
 
-
 #define DEFAULT_WORKERS_COUNT 4
-void init_workers_pool(){
+
+void init_workers_pool() {
 
     workers_count = get_int_config_var_or_default("workers", DEFAULT_WORKERS_COUNT, true);
 
@@ -111,6 +118,7 @@ void init_workers_pool(){
 
 
     pthreads = g_new0(pthread_t, workers_count);
+    pthreads_finished = g_new0(bool, workers_count);
     workers_buffers = g_new0(GString*, workers_count);
 
     clients_queue = g_queue_new();
@@ -119,7 +127,7 @@ void init_workers_pool(){
     pthread_cond_init(&workers_cond, NULL);
 
     for (int i = 0; i < workers_count; ++i) {
-        long* worker_id = g_new0(long, 1);
+        long *worker_id = g_new0(long, 1);
         *worker_id = i;
         pthread_create(&pthreads[i], NULL, worker_impl, worker_id);
 
@@ -127,29 +135,82 @@ void init_workers_pool(){
     }
 }
 
-void stop_all_workers(){
+void stop_all_workers() {
     g_atomic_int_set(&total_stop, TRUE);
     pthread_cond_broadcast(&workers_cond);
 }
 
-void stop_workers_pool(){
+pthread_mutex_t any_thread_finishing_mutex;
+
+void *timeout_kill_impl(void *arg) {
+    bool all_finished = true;
+    do {
+        sleep(3);
+        pthread_mutex_lock(&any_thread_finishing_mutex);
+        for (int i = 0; i < workers_count; ++i) {
+            if (!pthreads_finished[i]) {
+                pthread_cancel(pthreads[i]);
+                LOG(LOG_WARNING, "Worker %d killed by timeout", i);
+            }
+        }
+
+        all_finished = true;
+        for (int i = 0; i < workers_count; ++i) {
+            if (!pthreads_finished[i]) {
+                all_finished = false;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&any_thread_finishing_mutex);
+    } while (!all_finished);
+    return NULL + 0;
+}
+
+void stop_workers_pool() {
     LOG(LOG_INFO, "Stopping workers pool");
     stop_all_workers();
 
-    for (int i = 0; i < workers_count; ++i) {
-        pthread_join(pthreads[i], NULL);
+
+    pthread_mutex_init(&any_thread_finishing_mutex, NULL);
+
+    pthread_t timeout_thread;
+    pthread_create(&timeout_thread, NULL, timeout_kill_impl, NULL);
+
+
+    pthread_mutex_lock(&any_thread_finishing_mutex);
+    while (true) {
+        int all_done = 1;
+        for (int i = 0; i < workers_count; ++i) {
+            if (!pthreads_finished[i]) {
+                //LOG(LOG_INFO, "Check %d", i);
+                if (pthread_tryjoin_np(pthreads[i], NULL) == 0)
+                    pthreads_finished[i] = true;
+                else
+                    all_done = 0;
+            }
+        }
+        if (all_done) break;
+
+        pthread_mutex_unlock(&any_thread_finishing_mutex);
+        usleep(100000);
+        pthread_mutex_lock(&any_thread_finishing_mutex);
     }
+    pthread_mutex_unlock(&any_thread_finishing_mutex);
+
+    pthread_cancel(timeout_thread);
+    pthread_join(timeout_thread, NULL);
+
     for (int i = 0; i < workers_count; ++i) {
         g_string_free(workers_buffers[i], TRUE);
     }
 }
 
-void add_client_to_workers_pool_if_require(RepaClient* client){
+void add_client_to_workers_pool_if_require(RepaClient *client) {
     pthread_mutex_lock(&client->mutex);
-    if(
-        g_atomic_int_get(&client->is_in_working_queue) == TRUE ||
-        g_atomic_int_get(&client->is_doing_tasks) == TRUE ||
-        g_atomic_int_get(&client->marked_for_free) == TRUE){
+    if (
+            g_atomic_int_get(&client->is_in_working_queue) == TRUE ||
+            g_atomic_int_get(&client->is_doing_tasks) == TRUE ||
+            g_atomic_int_get(&client->marked_for_free) == TRUE) {
         pthread_mutex_unlock(&client->mutex);
         return;
     }
