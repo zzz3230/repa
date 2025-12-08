@@ -20,6 +20,7 @@
 #include <sys/eventfd.h>
 
 #define DEFAULT_PORT 6380
+void master_listener_loop(void* data);
 
 int server_fd;
 struct sockaddr_in address;
@@ -78,6 +79,8 @@ void init_master_listener() {
 
     set_client_executed_client(on_client_execution_finished);
 
+    coro_create(get_default_scheduler(), master_listener_loop, NULL, 0);
+
     LOG(LOG_INFO, "Server started on port %d", port);
 }
 
@@ -94,7 +97,7 @@ void register_new_client(int fd) {
     RepaClient *client = g_new0(RepaClient, 1);
     client->net_client = net_client;
 
-    pthread_mutex_init(&client->mutex, NULL);
+    cor_mutex_init(&client->mutex);
 
     client->commands_queue = g_queue_new();
 
@@ -110,9 +113,14 @@ void register_new_client(int fd) {
 void free_client(RepaClient* client){
     g_atomic_int_set(&client->marked_for_free, 1);
 
-    EXT_FREE_LOG(LOG_INFO, "Free begin");
+    
+    int in_queue = g_atomic_int_get(&client->is_in_working_queue);
+    int doing_tasks = g_atomic_int_get(&client->is_doing_tasks);
 
-    if(g_atomic_int_get(&client->is_in_working_queue) || g_atomic_int_get(&client->is_doing_tasks)){
+    LOG(LOG_DEBUG, "Free client %ld: in_queue=%d, doing_tasks=%d",
+        client->id, in_queue, doing_tasks);
+
+    if(in_queue || doing_tasks){
         pthread_mutex_lock(&to_free_clients_mutex);
         g_array_append_val(to_free_clients, client);
         pthread_mutex_unlock(&to_free_clients_mutex);
@@ -171,13 +179,17 @@ void free_clients_and_server() {
 
 
 
-void master_listener_loop() {
+void master_listener_loop(void* data) {
     while (1) {
         int reserved_fds = 3;
 
         // Готовим pollfds
         int nfds = (int) (reserved_fds + clients->len);
         struct pollfd *pfds = g_new0(struct pollfd, nfds);
+
+        poll_fd_array fds;
+        fds.len = nfds;
+        fds.data = pfds;
 
         // ==== RESERVED FDS =====
 
@@ -201,7 +213,8 @@ void master_listener_loop() {
             pfds[i + reserved_fds].events = POLLIN;
         }
 
-        int activity = poll(pfds, nfds, -1);
+        //printf("waiting...\n");
+        int activity = cor_poll(fds);
         //LOG(LOG_INFO, "Activity detected on %d descriptor(s)", activity);
 
         if (activity < 0) {
@@ -214,6 +227,7 @@ void master_listener_loop() {
             uint64_t val;
             read(event_fd, &val, sizeof(val));
             LOG(LOG_INFO, "Stopping server listener");
+            g_free(pfds);
             free_clients_and_server();
             break;
         }

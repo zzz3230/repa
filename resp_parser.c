@@ -368,7 +368,8 @@ void print_resp_data(const RespData *data) {
 }
 
 void resp_parser_free(RespParser *parser){
-
+    g_string_free(parser->buffer, TRUE);
+    g_free(parser);
 }
 
 void resp_data_free(RespData *resp_data){ // NOLINT(*-no-recursion)

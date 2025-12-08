@@ -15,7 +15,7 @@ typedef enum e_event{
 typedef void (*event_cb)(Event event_type);
 
 void init_master_listener();
-void master_listener_loop();
+//void master_listener_loop();
 void stop_master_listener();
 void shutdown_request_set_callback(event_cb cb);
 

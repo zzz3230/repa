@@ -14,6 +14,8 @@
 typedef struct type##_array {type* data; int len;} type##_array;
 
 def_array_type(int)
+typedef struct pollfd poll_fd;
+def_array_type(poll_fd)
 
 struct coro_t;
 
@@ -21,9 +23,14 @@ typedef struct coro_sched_t {
     GQueue *ready_coros;
     GArray *waiting_fds_coros;
     GArray *waiting_sleeps_coros;
+    GHashTable *waiting_tokens;
     GHashTable *fd_to_coro;
     struct coro_t* coro;
+    GArray *all_coros;
 
+    volatile bool finished;
+    bool finishing;
+    ucontext_t main_context;
     GArray *_poll_fds;
 } coro_sched_t;
 
@@ -31,12 +38,14 @@ typedef enum {
     NONE = 0,
     RUNNING = 0x10,
     READY = 0x20,
+    FINISHED = 0x30,
     WAITING_MUTEX = 0x11,
     WAITING_FDS = 0x21,
     WAITING_SLEEP = 0x31,
     WAITING_SEMAPHORE = 0x41,
     WAITING_RLOCK = 0x51,
     WAITING_WLOCK = 0x61,
+    WAITING_TOKEN = 0x71,
 
     WAITING_ANY = 0x01
 } CoroStatus;
@@ -46,15 +55,17 @@ typedef struct coro_t {
     coro_sched_t *scheduler;
 
     char *stack;
-    int finished;
     long stopwatch_elapsed_prev;
     long stopwatch_begin_cur;
 
-    int_array waiting_fds;
-    short waiting_events;
+    poll_fd_array waiting_fds;
+    int polled_fds;
 
     long awake_time;
+    bool finished;
+    bool freed;
 
+    int id;
     CoroStatus status;
 } coro_t;
 
@@ -108,10 +119,16 @@ size_t cor_count_waiting(coro_sched_t *sched);
 
 size_t cor_count_total(coro_sched_t *sched);
 
+
+
 /* -----------------------
    Synchronization primitives
    (cooperative — works within a single thread)
    ----------------------- */
+
+
+int cor_poll(poll_fd_array fds);
+
 
 /* Coroutine queue (opaque) — used internally by primitives */
 typedef struct cor_queue_t cor_queue_t;
@@ -176,6 +193,10 @@ void cor_rwlock_destroy(cor_rwlock_t *rw);
  * Returns 0 — externally woken, 1 — timeout.
  */
 int cor_sleep_ms(unsigned int ms);
+
+typedef struct {
+    GQueue* waiters;
+} cor_wait_token_info;
 
 /* Wake up one/all coroutines waiting on an object (opaque token).
  * Used to implement wait/notify pattern.

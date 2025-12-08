@@ -43,26 +43,38 @@ RepaDB *db_init(size_t size) {
     );
     db->allocated_size = size;
 
-    db->index = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    pthread_rwlock_init(&db->index_rwlock, NULL);
+    db->index = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, NULL);
+    cor_rwlock_init(&db->index_rwlock);
 
     db->index_area = g_array_new(FALSE, TRUE, sizeof(DBIndex *));
-    pthread_rwlock_init(&db->index_area_rwlock, NULL);
+    cor_rwlock_init(&db->index_area_rwlock);
 
 
     DBIndex *null_index = g_new0(DBIndex, 1);
     g_array_append_val(db->index_area, null_index);
 
     db->free_index = g_tree_new_full((GCompareDataFunc) compare_offset, NULL, NULL, NULL);
-    pthread_rwlock_init(&db->free_index_rwlock, NULL);
+    cor_rwlock_init(&db->free_index_rwlock);
 
 
     db->empty_indexes = g_array_new(FALSE, TRUE, sizeof(uint));
-    pthread_rwlock_init(&db->empty_indexes_rwlock, NULL);
+    cor_rwlock_init(&db->empty_indexes_rwlock);
 
     db->ordered_index = g_tree_new_full((GCompareDataFunc) compare_offset, NULL, NULL, NULL);
 
     return db;
+}
+
+void free_index(DBIndex* index){
+    g_free(index->name);
+    g_free(index);
+}
+gboolean free_values_cb(gpointer key, gpointer value, gpointer user_data)
+{
+    if (value) {
+        free(value);
+    }
+    return FALSE;
 }
 
 void db_free(RepaDB *db) {
@@ -72,6 +84,20 @@ void db_free(RepaDB *db) {
         }
         db->data = NULL;
     }
+
+    g_tree_foreach(db->free_index, free_values_cb, NULL);
+    g_tree_destroy(db->free_index);
+
+    for (int i = 0; i < db->index_area->len; ++i) {
+        free_index(g_array_index(db->index_area, DBIndex*, i));
+    }
+    g_array_free(db->index_area, TRUE);
+
+    g_hash_table_destroy(db->index);
+    g_tree_destroy(db->ordered_index);
+    g_array_free(db->empty_indexes, TRUE);
+
+    g_free(db);
 }
 
 void init_master_db() {
@@ -92,10 +118,10 @@ void stop_master_db() {
 }
 
 bool proceed_replacement(RepaDB *db, ssize_t *new_offset, ssize_t needed_size, DBIndex* skip, bool* was_skip) {
-    pthread_rwlock_wrlock(&db->free_index_rwlock);
-    pthread_rwlock_wrlock(&db->index_rwlock);
-    pthread_rwlock_wrlock(&db->index_area_rwlock);
-    pthread_rwlock_wrlock(&db->empty_indexes_rwlock);
+    cor_rwlock_wrlock(&db->free_index_rwlock);
+    cor_rwlock_wrlock(&db->index_rwlock);
+    cor_rwlock_wrlock(&db->index_area_rwlock);
+    cor_rwlock_wrlock(&db->empty_indexes_rwlock);
 
     ssize_t begin_offset = 0;
     ssize_t current_offset = begin_offset;
@@ -153,10 +179,10 @@ bool proceed_replacement(RepaDB *db, ssize_t *new_offset, ssize_t needed_size, D
 
     cleanup:
 
-    pthread_rwlock_unlock(&db->free_index_rwlock);
-    pthread_rwlock_unlock(&db->index_rwlock);
-    pthread_rwlock_unlock(&db->index_area_rwlock);
-    pthread_rwlock_unlock(&db->empty_indexes_rwlock);
+    cor_rwlock_unlock(&db->free_index_rwlock);
+    cor_rwlock_unlock(&db->index_rwlock);
+    cor_rwlock_unlock(&db->index_area_rwlock);
+    cor_rwlock_unlock(&db->empty_indexes_rwlock);
 
     return founded_size > 0;
 }
@@ -194,7 +220,7 @@ void db_service_join_free_segments(RepaDB *db) {
     JoinFreeSegmentsData *userdata = g_new0(JoinFreeSegmentsData, 1);
     userdata->to_remove = g_array_new(FALSE, FALSE, sizeof(void *));
 
-    pthread_rwlock_wrlock(&db->free_index_rwlock);
+    cor_rwlock_wrlock(&db->free_index_rwlock);
 
     g_tree_foreach(db->free_index, internal__join_free_segments_foreach, userdata);
 
@@ -202,7 +228,7 @@ void db_service_join_free_segments(RepaDB *db) {
         g_tree_remove(db->free_index, g_array_index(userdata->to_remove, gpointer, i));
     }
 
-    pthread_rwlock_unlock(&db->free_index_rwlock);
+    cor_rwlock_unlock(&db->free_index_rwlock);
 
     g_array_free(userdata->to_remove, TRUE);
     g_free(userdata);
@@ -211,40 +237,40 @@ void db_service_join_free_segments(RepaDB *db) {
 }
 
 void db_write_lock(RepaDB *db, GString *key) {
-    pthread_rwlock_rdlock(&db->index_area_rwlock);
-    pthread_rwlock_rdlock(&db->index_rwlock);
+    cor_rwlock_rdlock(&db->index_area_rwlock);
+    cor_rwlock_rdlock(&db->index_rwlock);
     guint index_pos = GPOINTER_TO_UINT(g_hash_table_lookup(db->index, key->str));
     DBIndex *index = g_array_index(db->index_area, DBIndex*, index_pos);
-    pthread_rwlock_wrlock(&index->rwlock);
-    pthread_rwlock_unlock(&db->index_rwlock);
-    pthread_rwlock_unlock(&db->index_area_rwlock);
+    cor_rwlock_wrlock(&index->rwlock);
+    cor_rwlock_unlock(&db->index_rwlock);
+    cor_rwlock_unlock(&db->index_area_rwlock);
 }
 
 void db_unlock(RepaDB *db, GString *key) {
-    pthread_rwlock_rdlock(&db->index_area_rwlock);
-    pthread_rwlock_rdlock(&db->index_rwlock);
+    cor_rwlock_rdlock(&db->index_area_rwlock);
+    cor_rwlock_rdlock(&db->index_rwlock);
     guint index_pos = GPOINTER_TO_UINT(g_hash_table_lookup(db->index, key->str));
     DBIndex *index = g_array_index(db->index_area, DBIndex*, index_pos);
-    pthread_rwlock_unlock(&index->rwlock);
-    pthread_rwlock_unlock(&db->index_rwlock);
-    pthread_rwlock_unlock(&db->index_area_rwlock);
+    cor_rwlock_unlock(&index->rwlock);
+    cor_rwlock_unlock(&db->index_rwlock);
+    cor_rwlock_unlock(&db->index_area_rwlock);
 }
 
 DBActionStatus db_set(RepaDB *db, GString *key, GString *value) {
-    pthread_rwlock_rdlock(&db->index_area_rwlock);
-    pthread_rwlock_rdlock(&db->index_rwlock);
+    cor_rwlock_rdlock(&db->index_area_rwlock);
+    cor_rwlock_rdlock(&db->index_rwlock);
     guint index_pos = GPOINTER_TO_UINT(g_hash_table_lookup(db->index, key->str));
-    pthread_rwlock_unlock(&db->index_rwlock);
+    cor_rwlock_unlock(&db->index_rwlock);
 
     DBActionStatus alloc_status;
 
     if (index_pos) {
         DBIndex *index = g_array_index(db->index_area, DBIndex*, index_pos);
 
-        pthread_rwlock_unlock(&db->index_area_rwlock);
+        cor_rwlock_unlock(&db->index_area_rwlock);
         alloc_status = db_set__update_inline_value(db, index, value);
     } else {
-        pthread_rwlock_unlock(&db->index_area_rwlock);
+        cor_rwlock_unlock(&db->index_area_rwlock);
         alloc_status = db_set__append_value(db, key, value);
     }
 
@@ -254,23 +280,23 @@ DBActionStatus db_set(RepaDB *db, GString *key, GString *value) {
 }
 
 GString *db_get(RepaDB *db, GString *key) {
-    pthread_rwlock_rdlock(&db->index_rwlock);
+    cor_rwlock_rdlock(&db->index_rwlock);
     uint index_pos = GPOINTER_TO_UINT(g_hash_table_lookup(db->index, key->str));
-    pthread_rwlock_unlock(&db->index_rwlock);
+    cor_rwlock_unlock(&db->index_rwlock);
 
     if (index_pos == 0) {
         return NULL;
     }
 
-    pthread_rwlock_rdlock(&db->index_area_rwlock);
+    cor_rwlock_rdlock(&db->index_area_rwlock);
     DBIndex *index = g_array_index(db->index_area, DBIndex*, index_pos);
-    pthread_rwlock_unlock(&db->index_area_rwlock);
+    cor_rwlock_unlock(&db->index_area_rwlock);
 
     GString *result = g_string_sized_new((ssize_t) index->size);
 
-    pthread_rwlock_rdlock(&index->rwlock);
+    cor_rwlock_rdlock(&index->rwlock);
     g_string_append_len(result, db->data + index->offset, index->size);
-    pthread_rwlock_unlock(&index->rwlock);
+    cor_rwlock_unlock(&index->rwlock);
 
     db_print_internal(db);
 
@@ -280,7 +306,7 @@ GString *db_get(RepaDB *db, GString *key) {
 
 bool search_extend_free_space(RepaDB *db, ssize_t start_offset, ssize_t needed_size, bool allocate) {
     ssize_t founded_size = 0;
-    pthread_rwlock_wrlock(&db->free_index_rwlock);
+    cor_rwlock_wrlock(&db->free_index_rwlock);
     while (TRUE) {
         ssize_t next_section_offset = start_offset + founded_size;
         DBFreeBlock *free_block = g_tree_lookup(db->free_index, GSIZE_TO_POINTER(next_section_offset));
@@ -301,11 +327,11 @@ bool search_extend_free_space(RepaDB *db, ssize_t start_offset, ssize_t needed_s
     }
 
     if (founded_size < needed_size) {
-        pthread_rwlock_unlock(&db->free_index_rwlock);
+        cor_rwlock_unlock(&db->free_index_rwlock);
         return FALSE;
     }
     if (founded_size == needed_size) {
-        pthread_rwlock_unlock(&db->free_index_rwlock);
+        cor_rwlock_unlock(&db->free_index_rwlock);
         return TRUE;
     }
 
@@ -319,7 +345,7 @@ bool search_extend_free_space(RepaDB *db, ssize_t start_offset, ssize_t needed_s
 
         g_tree_insert(db->free_index, GSIZE_TO_POINTER(rest_section_offset), free_block);
     }
-    pthread_rwlock_unlock(&db->free_index_rwlock);
+    cor_rwlock_unlock(&db->free_index_rwlock);
 
     return TRUE;
 }
@@ -353,7 +379,7 @@ size_t search_any_free_space(RepaDB *db, ssize_t needed_size, bool allocate, ssi
 
     userdata->needed_size = needed_size;
 
-    pthread_rwlock_wrlock(&db->free_index_rwlock);
+    cor_rwlock_wrlock(&db->free_index_rwlock);
 
     g_tree_foreach(db->free_index, internal__free_block_foreach, userdata);
     if (userdata->founded_block != NULL) {
@@ -374,7 +400,7 @@ size_t search_any_free_space(RepaDB *db, ssize_t needed_size, bool allocate, ssi
             }
         }
 
-        pthread_rwlock_unlock(&db->free_index_rwlock);
+        cor_rwlock_unlock(&db->free_index_rwlock);
         g_free(userdata);
         return TRUE;
     }
@@ -383,12 +409,12 @@ size_t search_any_free_space(RepaDB *db, ssize_t needed_size, bool allocate, ssi
         *new_offset = (ssize_t) db->used_top;
         db->used_top += needed_size;
 
-        pthread_rwlock_unlock(&db->free_index_rwlock);
+        cor_rwlock_unlock(&db->free_index_rwlock);
         g_free(userdata);
         return TRUE;
     }
 
-    pthread_rwlock_unlock(&db->free_index_rwlock);
+    cor_rwlock_unlock(&db->free_index_rwlock);
 
     g_free(userdata);
 
@@ -411,7 +437,7 @@ DBActionStatus db_set__append_value(RepaDB *db, GString *key, GString *value) {
     index->offset = 0;
     index->timestamp = time(NULL);
     index->ttl = -1;
-    pthread_rwlock_init(&index->rwlock, NULL);
+    cor_rwlock_init(&index->rwlock);
 
 
     bool _;
@@ -428,9 +454,9 @@ DBActionStatus db_set__append_value(RepaDB *db, GString *key, GString *value) {
 
     uint index_pos = 0;
 
-    pthread_rwlock_wrlock(&db->index_area_rwlock);
-    pthread_rwlock_wrlock(&db->index_rwlock);
-    pthread_rwlock_wrlock(&db->empty_indexes_rwlock);
+    cor_rwlock_wrlock(&db->index_area_rwlock);
+    cor_rwlock_wrlock(&db->index_rwlock);
+    cor_rwlock_wrlock(&db->empty_indexes_rwlock);
 
     if (db->empty_indexes->len > 0) {
         index_pos = g_array_index(db->empty_indexes, uint, 0);
@@ -441,30 +467,30 @@ DBActionStatus db_set__append_value(RepaDB *db, GString *key, GString *value) {
         g_array_append_val(db->index_area, index);
         index_pos = db->index_area->len - 1;
     }
-    pthread_rwlock_unlock(&db->index_area_rwlock);
-    pthread_rwlock_unlock(&db->empty_indexes_rwlock);
+    cor_rwlock_unlock(&db->index_area_rwlock);
+    cor_rwlock_unlock(&db->empty_indexes_rwlock);
 
 
 
     uint existed_index = GPOINTER_TO_UINT(g_hash_table_lookup(db->index, name_for_index));
     if(existed_index != 0){
         LOG(LOG_WARNING, "Double set detected");
-        pthread_rwlock_unlock(&db->index_rwlock);
+        cor_rwlock_unlock(&db->index_rwlock);
         internal__db_del(db, key, true, true, false);
-        pthread_rwlock_wrlock(&db->index_rwlock);
+        cor_rwlock_wrlock(&db->index_rwlock);
     }
 
     g_hash_table_insert(db->index, name_for_index, GUINT_TO_POINTER(index_pos));
     g_tree_insert(db->ordered_index, GSIZE_TO_POINTER(index->offset), index);
-    pthread_rwlock_unlock(&db->index_rwlock);
+    cor_rwlock_unlock(&db->index_rwlock);
 
     return DB_OK;
 }
 
 DBActionStatus db_set__update_inline_value(RepaDB *db, DBIndex *index, GString *value) {
-    pthread_rwlock_rdlock(&index->rwlock);
+    cor_rwlock_rdlock(&index->rwlock);
     ssize_t prev_size = index->size;
-    pthread_rwlock_unlock(&index->rwlock);
+    cor_rwlock_unlock(&index->rwlock);
     ssize_t new_size = (ssize_t) value->len;
 
     ssize_t new_offset = -1;
@@ -472,7 +498,7 @@ DBActionStatus db_set__update_inline_value(RepaDB *db, DBIndex *index, GString *
     bool free_prev_segment = FALSE;
 
 
-    pthread_rwlock_wrlock(&index->rwlock);
+    cor_rwlock_wrlock(&index->rwlock);
 
     if (new_size == prev_size) {
         new_offset = (ssize_t) index->offset;
@@ -485,9 +511,9 @@ DBActionStatus db_set__update_inline_value(RepaDB *db, DBIndex *index, GString *
         free_block->offset = new_end;
         free_block->size = free_section_size;
 
-        pthread_rwlock_wrlock(&db->free_index_rwlock);
+        cor_rwlock_wrlock(&db->free_index_rwlock);
         g_tree_insert(db->free_index, GSIZE_TO_POINTER(new_end), free_block);
-        pthread_rwlock_unlock(&db->free_index_rwlock);
+        cor_rwlock_unlock(&db->free_index_rwlock);
 
 
         new_offset = (ssize_t) index->offset;
@@ -517,38 +543,38 @@ DBActionStatus db_set__update_inline_value(RepaDB *db, DBIndex *index, GString *
         free_block->offset = index->offset;
         free_block->size = index->size;
 
-        pthread_rwlock_wrlock(&db->free_index_rwlock);
+        cor_rwlock_wrlock(&db->free_index_rwlock);
         g_tree_insert(db->free_index, GSIZE_TO_POINTER(free_block->offset), free_block);
-        pthread_rwlock_unlock(&db->free_index_rwlock);
+        cor_rwlock_unlock(&db->free_index_rwlock);
     }
 
     //update index
-    pthread_rwlock_wrlock(&db->index_rwlock);
+    cor_rwlock_wrlock(&db->index_rwlock);
     g_tree_remove(db->ordered_index, GSIZE_TO_POINTER(index->offset));
     index->offset = new_offset;
     index->size = new_size;
     index->timestamp = time(NULL);
     g_tree_insert(db->ordered_index, GSIZE_TO_POINTER(index->offset), index);
-    pthread_rwlock_unlock(&db->index_rwlock);
+    cor_rwlock_unlock(&db->index_rwlock);
 
 
-    pthread_rwlock_unlock(&index->rwlock);
+    cor_rwlock_unlock(&index->rwlock);
 
     return DB_OK;
 }
 
 ssize_t db_get_value_size(RepaDB *db, GString *key) {
-    pthread_rwlock_rdlock(&db->index_rwlock);
+    cor_rwlock_rdlock(&db->index_rwlock);
     uint index_pos = GPOINTER_TO_UINT(g_hash_table_lookup(db->index, key->str));
-    pthread_rwlock_unlock(&db->index_rwlock);
+    cor_rwlock_unlock(&db->index_rwlock);
 
     if (index_pos == 0) {
         return -1;
     }
 
-    pthread_rwlock_rdlock(&db->index_area_rwlock);
+    cor_rwlock_rdlock(&db->index_area_rwlock);
     DBIndex *index = g_array_index(db->index_area, DBIndex*, index_pos);
-    pthread_rwlock_unlock(&db->index_area_rwlock);
+    cor_rwlock_unlock(&db->index_area_rwlock);
 
     return index->size;
 }
@@ -557,40 +583,40 @@ ssize_t db_get_value_size(RepaDB *db, GString *key) {
 #define IF_LOCK if(lock)
 
 DBActionStatus internal__db_del(RepaDB *db, GString *key, bool lock, bool create_free_block, bool do_not_lock_index_rwlock) {
-    IF_LOCK if(!do_not_lock_index_rwlock) pthread_rwlock_wrlock(&db->index_rwlock);
+    IF_LOCK if(!do_not_lock_index_rwlock) cor_rwlock_wrlock(&db->index_rwlock);
     uint index_pos = GPOINTER_TO_UINT(g_hash_table_lookup(db->index, key->str));
 
     if (index_pos == 0) {
-        IF_LOCK if(!do_not_lock_index_rwlock) pthread_rwlock_unlock(&db->index_rwlock);
+        IF_LOCK if(!do_not_lock_index_rwlock) cor_rwlock_unlock(&db->index_rwlock);
         return DB_KEY_NOT_FOUND;
     }
     g_hash_table_remove(db->index, key->str);
 
 
-    IF_LOCK pthread_rwlock_wrlock(&db->index_area_rwlock);
+    IF_LOCK cor_rwlock_wrlock(&db->index_area_rwlock);
     DBIndex *index = g_array_index(db->index_area, DBIndex*, index_pos);
     g_tree_remove(db->ordered_index, GSIZE_TO_POINTER(index->offset));
 
-    IF_LOCK if(!do_not_lock_index_rwlock) pthread_rwlock_unlock(&db->index_rwlock);
+    IF_LOCK if(!do_not_lock_index_rwlock) cor_rwlock_unlock(&db->index_rwlock);
 
 
-    IF_LOCK pthread_rwlock_wrlock(&db->empty_indexes_rwlock);
+    IF_LOCK cor_rwlock_wrlock(&db->empty_indexes_rwlock);
     g_array_append_val(db->empty_indexes, index_pos);
-    IF_LOCK pthread_rwlock_unlock(&db->empty_indexes_rwlock);
+    IF_LOCK cor_rwlock_unlock(&db->empty_indexes_rwlock);
 
     if (create_free_block) {
         DBFreeBlock *free_block = g_new0(DBFreeBlock, 1);
         free_block->offset = index->offset;
         free_block->size = index->size;
 
-        IF_LOCK pthread_rwlock_wrlock(&db->free_index_rwlock);
+        IF_LOCK cor_rwlock_wrlock(&db->free_index_rwlock);
         g_tree_insert(db->free_index, GSIZE_TO_POINTER(free_block->offset), free_block);
-        IF_LOCK pthread_rwlock_unlock(&db->free_index_rwlock);
+        IF_LOCK cor_rwlock_unlock(&db->free_index_rwlock);
     }
 
-    g_free(index);
+    free_index(index);
     g_array_index(db->index_area, DBIndex*, index_pos) = NULL;
-    IF_LOCK pthread_rwlock_unlock(&db->index_area_rwlock);
+    IF_LOCK cor_rwlock_unlock(&db->index_area_rwlock);
 
     db_print_internal(db);
 
@@ -637,10 +663,10 @@ gboolean internal__print_free_block_foreach(gpointer key, gpointer value, gpoint
 void db_print_internal(RepaDB *db) {
     return;
 
-    pthread_rwlock_rdlock(&db->free_index_rwlock);
-    pthread_rwlock_rdlock(&db->index_rwlock);
-    pthread_rwlock_rdlock(&db->index_area_rwlock);
-    pthread_rwlock_rdlock(&db->empty_indexes_rwlock);
+    cor_rwlock_rdlock(&db->free_index_rwlock);
+    cor_rwlock_rdlock(&db->index_rwlock);
+    cor_rwlock_rdlock(&db->index_area_rwlock);
+    cor_rwlock_rdlock(&db->empty_indexes_rwlock);
 
     TestPrintElement *bitmap = g_new0(TestPrintElement, look_size);
 
@@ -702,8 +728,8 @@ void db_print_internal(RepaDB *db) {
 
     fflush(stdout);
 
-    pthread_rwlock_unlock(&db->free_index_rwlock);
-    pthread_rwlock_unlock(&db->index_rwlock);
-    pthread_rwlock_unlock(&db->index_area_rwlock);
-    pthread_rwlock_unlock(&db->empty_indexes_rwlock);
+    cor_rwlock_unlock(&db->free_index_rwlock);
+    cor_rwlock_unlock(&db->index_rwlock);
+    cor_rwlock_unlock(&db->index_area_rwlock);
+    cor_rwlock_unlock(&db->empty_indexes_rwlock);
 }

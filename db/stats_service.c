@@ -23,10 +23,10 @@ char** get_available_stats(){
 }
 
 void init_stats_service(){
-    locks = g_hash_table_new(g_str_hash, g_str_equal);
+    locks = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, g_free);
     for (int i = 0; stats[i][0]; ++i) {
-        pthread_mutex_t* mutex = g_new0(pthread_mutex_t, 1);
-        pthread_mutex_init(mutex, NULL);
+        cor_mutex_t* mutex = g_new0(cor_mutex_t, 1);
+        cor_mutex_init(mutex);
         g_hash_table_insert(locks, stats[i], mutex);
     }
 }
@@ -80,15 +80,16 @@ int db_int_add(RepaDB* db, GString* key, int delta){
 
 
 int stats_add(char* name, int value){
-    pthread_mutex_t* mutex = g_hash_table_lookup(locks, name);
+    return 0;
+    cor_mutex_t* mutex = g_hash_table_lookup(locks, name);
     if(mutex == NULL){
         LOG(LOG_ERROR, "Unknown stat: '%s'", name);
     }
     else{
-        pthread_mutex_lock(mutex);
+        cor_mutex_lock(mutex);
     }
     GString g_name = { .str = name, .len = strlen(name), .allocated_len = 0 };
     int res = db_int_add(get_master_db(), &g_name, value);
-    if(mutex != NULL) pthread_mutex_unlock(mutex);
+    if(mutex != NULL) cor_mutex_unlock(mutex);
     return res;
 }

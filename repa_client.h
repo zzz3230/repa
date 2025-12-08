@@ -8,11 +8,12 @@
 #include <glib.h>
 #include "network/master_listener.h"
 #include "network/net_client.h"
+#include "default_coro.h"
 
 typedef struct s_repa_client {
     NetClient* net_client;
     GQueue* commands_queue;
-    pthread_mutex_t mutex;
+    cor_mutex_t mutex;
     long id;
     gint is_in_working_queue;
     gint is_doing_tasks;

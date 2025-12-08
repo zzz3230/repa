@@ -10,6 +10,8 @@
 #include "util/config.h"
 #include "signal_handler.h"
 #include "db/db_services.h"
+#include "coroutine_pool/coroutine_pool.h"
+#include "default_coro.h"
 
 ProxyProgramArguments program_arguments = {0};
 
@@ -25,6 +27,8 @@ void on_shutdown_request(Event event){
 
 int main(int argc, char** argv) {
     init_signal_handler();
+
+    init_default_scheduler();
 
     init_logger("repa_logs.txt", 1024 * 1024);
 
@@ -46,7 +50,8 @@ int main(int argc, char** argv) {
     start_db_services();
 
     shutdown_request_set_callback(on_shutdown_request);
-    master_listener_loop();
+    //master_listener_loop();
+    cor_run(get_default_scheduler());
 
     free(proxy_path);
     printf("Exiting from REPA SERVER\n");
